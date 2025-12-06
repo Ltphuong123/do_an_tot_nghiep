@@ -1,0 +1,147 @@
+Table Notebooks {
+  id uuid [primary key, default: `uuid_generate_v4()`]
+  user_id uuid
+  name varchar(100) [not null]
+  vocab_count int [default: 0]
+  created_by uuid
+  created_at timestamptz [default: `CURRENT_TIMESTAMP`]
+  options json [not null, note: "{show_hanzi: bool, show_pinyin: bool, show_meaning: bool, sort_by: string}"]
+  is_premium boolean [default: false]
+  status varchar(50) [not null, note: "Enum: published | draft"]
+  Note: '''
+  - Sổ tay cá nhân hoặc sẵn có (user_id NULL cho sẵn có).
+  - Trigger cập nhật vocab_count từ NotebookVocabItems.
+  - Truy cập premium kiểm tra qua Users.subscription_id.
+  '''
+  
+  Indexes {
+    user_id [type: btree]
+  }
+}
+
+Table Vocabulary {
+  id uuid [primary key, default: `uuid_generate_v4()`]
+  hanzi varchar(50) [not null]
+  pinyin varchar(50) [not null]
+  meaning text [not null]
+  notes text
+  level text[] [not null, note: "Một từ có thể thuộc nhiều HSK levels: HSK1, HSK2, ..., HSK7-9, HSKK"]
+  image_url text
+
+  Note: '''
+  - Unique constraint (hanzi+pinyin) để tránh trùng lặp
+  - Từ vựng có thể liên kết nhiều từ loại (WordType)
+  '''
+
+  Indexes {
+    (hanzi, pinyin) [unique]
+    level [type: gin]
+  }
+}
+
+Table WordType {
+  code varchar(50) [primary key, note: "Enum: Danh từ, Đại từ, Động từ, Tính từ, Trạng từ, Giới từ, Liên từ, Trợ từ, Thán từ, Số từ, Lượng từ, Thành phần câu, Cụm từ"]
+
+  Note: '''
+  - Một từ có thể có nhiều từ loại
+  '''
+}
+
+Table VocabularyWordType {
+  vocab_id uuid [not null]
+  word_type varchar(50) [not null]
+
+  Note: '''
+  - Bảng trung gian N:N giữa Vocabulary và WordType
+  - Cho phép một từ vựng có nhiều từ loại
+  '''
+
+  Indexes {
+    (vocab_id)
+    (word_type)
+  }
+
+  primary key (vocab_id, word_type)
+}
+
+// Table NotebookVocabItems
+Table NotebookVocabItems {
+  notebook_id uuid [not null]
+  vocab_id uuid [not null]
+  status varchar(20) [not null, note: "Enum: 'đã thuộc', 'chưa thuộc', 'yêu thích', 'không chắc'"]
+  added_at timestamptz [default: `CURRENT_TIMESTAMP`]
+  
+  Note: '''
+  - Bảng liên kết N:N cho Notebook-Vocabulary.
+  - Thống kê (ví dụ, số từ đã thuộc) qua COUNT GROUP BY status.
+  '''
+  
+  Indexes {
+    (notebook_id, vocab_id) [unique]
+  }
+}
+
+
+// Table AILessons
+Table AILessons {
+  id uuid [primary key, default: `uuid_generate_v4()`]
+  user_id uuid [not null]
+  theme varchar(100) [not null]
+  level varchar(10) [not null, note: "Enum: 'Cơ bản', 'Trung cấp', 'Cao cấp'"]
+  created_at timestamptz [default: `CURRENT_TIMESTAMP`]
+  content json [not null, note: "Structure: {vocabularies: [{vocab_id: uuid (ref Vocabulary.id), audio_url: string (S3 URL, null if not generated)}], phrases: [{vocab_id: uuid (ref Vocabulary.id), audio_url: string (S3 URL, null if not generated)}], tips: [{tip_id: uuid (ref Tips.id, null if not stored separately), vietnamese: string, chinese: string}], dialogues: [{messages: [{text: string (simplified hanzi), pinyin: string, audio_url: string (S3 URL, null if not generated)}]}]}"]
+  
+  Note: '''
+  - Lưu bài học tạo bởi AI.
+  - content.vocabularies/phrases reference Vocabulary.id.
+  - Lưu bài học tạo bởi AI (chủ đề và mức độ người dùng chọn).
+  - content.vocabularies/phrases reference Vocabulary.id để tránh trùng lặp.
+  - content.tips có thể reference Tips.id hoặc lưu inline (vietnamese+chinese).
+  - content.dialogues lưu dưới dạng JSON (chat-like, với audio URL, chỉ hán tự giản thể).
+  - Audio tạo động (TTS API), URL lưu tạm thời.
+  '''
+  
+  Indexes {
+    user_id [type: btree]
+    (theme, level) [type: btree]
+  }
+}
+
+// Table Reports
+Table Reports {
+  id uuid [primary key, default: `uuid_generate_v4()`]
+  reporter_id uuid [note: "Ai tạo báo cáo; NULL nếu do hệ thống (AI) tự phát hiện"]
+  target_type varchar(20) [not null, note: "Enum: 'post','comment','user','bug','other'"]
+  target_id uuid [note: "ID đối tượng bị báo cáo (post_id, comment_id, user_id, ...)"]
+  reason varchar(255) [not null, note: "Lý do báo cáo (VD: spam, xúc phạm, vi phạm bản quyền, lỗi hệ thống, v.v.)"]
+  details text [note: "Mô tả chi tiết hoặc khiếu nại (nếu có)"]
+  attachments jsonb [note: "Array of {url:string, mime:string, name?:string}"]
+  
+  status varchar(20) [default: 'pending', note: "Enum: 'pending','in_progress','resolved','dismissed'"]
+  resolution text [note: "Kết quả xử lý hoặc ghi chú của admin"]
+  
+  resolved_by uuid [note: "Admin đã xử lý xong"]
+  resolved_at timestamptz
+  created_at timestamptz [default: `CURRENT_TIMESTAMP`]
+  updated_at timestamptz [default: `CURRENT_TIMESTAMP`]
+  
+  related_violation_id uuid [note: "Liên kết với bản ghi vi phạm nếu có"]
+  auto_flagged boolean [default: false, note: "True nếu được tạo bởi AI thay vì user"]
+
+  Note: '''
+  - Lưu báo cáo do user hoặc hệ thống (AI) tạo.
+  - Khi target_type='bug' → dùng details + attachments để miêu tả lỗi hệ thống.
+  - assigned_to chỉ dùng khi có phân công nội bộ.
+  - resolution mô tả kết quả xử lý (VD: 'Nội dung hợp lệ', 'Bài viết bị xóa', ...).
+  - auto_flagged = true cho phép lọc riêng báo cáo do AI tự động.
+  - related_violation_id giúp truy vết sang Violation nếu xử lý dẫn đến vi phạm.
+  '''
+
+  Indexes {
+    (target_type, target_id) [type: btree]
+    reporter_id [type: btree]
+    status [type: btree]
+    created_at [type: btree]
+    auto_flagged [type: btree]
+  }
+}

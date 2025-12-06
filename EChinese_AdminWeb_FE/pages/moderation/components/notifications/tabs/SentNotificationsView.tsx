@@ -1,0 +1,181 @@
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import { Notification } from '../../../../../types';
+import { Pagination } from '../../../../../components/ui/pagination';
+import SentNotificationsToolbar from '../../toolbars/SentNotificationsToolbar';
+import FloatingBulkActionsBar from '../../../../../components/FloatingBulkActionsBar';
+import { TrashIcon, SendIcon, RotateCcwIcon } from '../../../../../constants';
+import NotificationCardList from '../../cards/NotificationCardList';
+import { useCardPagination } from '../../../hooks/useDynamicPagination';
+import { DateRange } from '../../shared/DateRangePicker';
+
+interface SentNotificationsViewProps {
+    notifications: Notification[];
+    onViewDetails: (notification: Notification) => void;
+    onCreate: () => void;
+    onPublish: (ids: string[]) => void;
+    onRevoke: (ids: string[]) => void;
+    onDelete: (ids: string[]) => void;
+    loading?: boolean;
+    onPageChange?: (page: number, filters?: any) => void;
+    currentPage?: number;
+    totalPages?: number;
+}
+
+const SentNotificationsView: React.FC<SentNotificationsViewProps> = ({ 
+    notifications, 
+    onViewDetails, 
+    onCreate, 
+    onPublish,
+    onRevoke, 
+    onDelete, 
+    loading = false,
+    onPageChange,
+    currentPage: externalCurrentPage,
+    totalPages: externalTotalPages
+}) => {
+    // Dynamic pagination cho notification cards (chỉ dùng khi không có server-side pagination)
+    const itemsPerPage = useCardPagination('notification');
+    
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filters, setFilters] = useState({ audience: 'all_audience', type: 'all', status: 'all' });
+    const [dates, setDates] = useState<DateRange>({ start: null, end: null });
+    const [localCurrentPage, setLocalCurrentPage] = useState(1);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    
+    // Sử dụng external page nếu có, nếu không dùng local page
+    const currentPage = externalCurrentPage || localCurrentPage;
+    const useServerPagination = !!onPageChange;
+
+    const sortedNotifications = useMemo(() => 
+        [...notifications].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()), 
+    [notifications]);
+
+    const filtered = useMemo(() => {
+        return sortedNotifications.filter(n => {
+            // Date filtering
+            if (dates.start) {
+                const startDate = new Date(dates.start);
+                startDate.setHours(0, 0, 0, 0);
+                if (new Date(n.created_at) < startDate) return false;
+            }
+            if (dates.end) {
+                const endDate = new Date(dates.end);
+                endDate.setHours(23, 59, 59, 999);
+                if (new Date(n.created_at) > endDate) return false;
+            }
+
+            const lowerSearch = searchTerm.toLowerCase();
+            const status = n.is_push_sent ? 'published' : 'draft';
+            return n.title.toLowerCase().includes(lowerSearch) &&
+                   (filters.audience === 'all_audience' || n.audience === filters.audience) &&
+                   (filters.status === 'all' || status === filters.status);
+        });
+    }, [sortedNotifications, searchTerm, filters, dates]);
+
+    // Nếu có server-side pagination, hiển thị trực tiếp data từ server
+    const paginated = useMemo(() => {
+        if (useServerPagination) {
+            // Server đã filter và paginate, chỉ cần filter theo date ở client (nếu có)
+            return sortedNotifications.filter(n => {
+                if (dates.start) {
+                    const startDate = new Date(dates.start);
+                    startDate.setHours(0, 0, 0, 0);
+                    if (new Date(n.created_at) < startDate) return false;
+                }
+                if (dates.end) {
+                    const endDate = new Date(dates.end);
+                    endDate.setHours(23, 59, 59, 999);
+                    if (new Date(n.created_at) > endDate) return false;
+                }
+                return true;
+            });
+        }
+        // Client-side: filter và paginate
+        return filtered.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+    }, [sortedNotifications, filtered, currentPage, itemsPerPage, useServerPagination, dates]);
+    
+    const pageCount = externalTotalPages || Math.ceil(filtered.length / itemsPerPage);
+
+    // Reset page and selection on filter change
+    useEffect(() => {
+        if (onPageChange) {
+            const apiFilters = {
+                status: filters.status !== 'all' ? filters.status : undefined,
+                audience: filters.audience !== 'all_audience' ? filters.audience : undefined,
+                type: filters.type !== 'all' ? filters.type : undefined
+            };
+            onPageChange(1, apiFilters);
+        } else {
+            setLocalCurrentPage(1);
+        }
+        setSelectedIds(new Set());
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchTerm, filters.status, filters.audience, filters.type, dates]);
+    
+    const handlePageChangeInternal = (page: number) => {
+        if (onPageChange) {
+            const apiFilters = {
+                status: filters.status !== 'all' ? filters.status : undefined,
+                audience: filters.audience !== 'all_audience' ? filters.audience : undefined,
+                type: filters.type !== 'all' ? filters.type : undefined
+            };
+            onPageChange(page, apiFilters);
+        } else {
+            setLocalCurrentPage(page);
+        }
+    };
+
+    const handleSelect = useCallback((id: string) => {
+        setSelectedIds(prev => {
+            const newSelection = new Set(prev);
+            if (newSelection.has(id)) newSelection.delete(id);
+            else newSelection.add(id);
+            return newSelection;
+        });
+    }, []);
+
+    const handleSelectAll = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.checked) setSelectedIds(new Set(paginated.map(n => n.id)));
+        else setSelectedIds(new Set());
+    }, [paginated]);
+
+    const selectedItems = useMemo(() => 
+        Array.from(selectedIds).map(id => notifications.find(n => n.id === id)).filter(Boolean) as Notification[], 
+    [selectedIds, notifications]);
+
+    const canPublish = selectedItems.length > 0 && selectedItems.some(n => !n.is_push_sent);
+    const canRevoke = selectedItems.length > 0 && selectedItems.some(n => n.is_push_sent);
+
+    return (
+        <div className="space-y-4">
+            <SentNotificationsToolbar 
+                searchTerm={searchTerm} 
+                onSearchChange={setSearchTerm} 
+                filters={filters} 
+                onFilterChange={setFilters} 
+                onCreate={onCreate}
+                dates={dates}
+                onDatesChange={setDates}
+            />
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden p-4">
+                <NotificationCardList
+                    notifications={paginated}
+                    loading={loading}
+                    onViewDetails={onViewDetails}
+                    showCheckboxes={true}
+                    selectedIds={selectedIds}
+                    onSelectAll={handleSelectAll}
+                    onSelect={handleSelect}
+                />
+                {!loading && pageCount > 1 && <Pagination currentPage={currentPage} totalPages={pageCount} onPageChange={handlePageChangeInternal} />}
+            </div>
+            <FloatingBulkActionsBar isVisible={selectedIds.size > 0} selectedCount={selectedIds.size} onClearSelection={() => setSelectedIds(new Set())}>
+                {canPublish && <button onClick={() => onPublish(Array.from(selectedIds))} className="flex items-center text-xs font-medium text-green-600 hover:text-black"><SendIcon className="w-4 h-4 mr-1.5"/> Phát hành</button>}
+                {canRevoke && <button onClick={() => onRevoke(Array.from(selectedIds))} className="flex items-center text-xs font-medium text-orange-600 hover:text-black"><RotateCcwIcon className="w-4 h-4 mr-1.5"/> Thu hồi</button>}
+                <button onClick={() => onDelete(Array.from(selectedIds))} className="flex items-center text-xs font-medium text-red-600 hover:text-black"><TrashIcon className="w-4 h-4 mr-1.5"/> Xóa</button>
+            </FloatingBulkActionsBar>
+        </div>
+    );
+};
+
+export default SentNotificationsView;
